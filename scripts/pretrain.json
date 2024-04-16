@@ -1,12 +1,17 @@
 {
-    "preprocess": {
-        "day_kline_path": "data/day",
-        "minute_kline_path": "data/minute",
-        "preprocess_dir": "data/seq",
-        "seq_length": 195,
-        "keep_minute_in_one_day": true
+    "data_process": {
+        "day_kline_path": "data/raw/day",
+        "minute_kline_path": "data/raw/5min",
+        "norm_output_dir": "data/process/norm",
+        "output_dir": "data/process/seq",
+        "seq_length": 60,
+        "minute_seq_in_one_day": true,
+        "drop_short_length": true,
+        "time_feature": false,
+        "std_norm": false
     },
     "model": {
+        "train_type": "pretrain",
         "patch_length": 16,
         "stride": 8,
         "activate": "selu",
@@ -22,7 +27,5 @@
         "d_ff": 512,
         "dropout": 0.2,
         "attention_dropout": 0.2
-    },
-                                                   
-
+    }
 }

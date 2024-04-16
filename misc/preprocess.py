@@ -1,5 +1,6 @@
 import os
 import glob
+import h5py
 import pandas as pd
 from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
@@ -114,7 +115,7 @@ class SeqExtractor(object):
         "amount"
     ]
     @staticmethod
-    def extract_one(file_path, out_dir, seq_type):
+    def extract_one(file_path, out_dir, seq_type, is_norm=False):
         if not os.path.exists(file_path):
             print("input path {} not exists".format(file_path))
             return file_path
@@ -125,25 +126,14 @@ class SeqExtractor(object):
         if seq_type == SeqExtractor.DAY:
             df = PriceAjust.full_backward_adjust(df)
         df = df.fillna(0.0)
-        for column in ("open", "close", "high", "low", "vol", "amount"):
-            df[column] = sn.fit_transform(df, column)
+        if is_norm:
+            for column in ("open", "close", "high", "low", "vol", "amount"):
+                df[column] = sn.fit_transform(df, column)
         df = df[SeqExtractor.COLUMNS]
         df.to_csv(os.path.join(out_dir, code + ".csv"), index=False)
-        sn.save(code, out_dir)
+        if is_norm:
+            sn.save(code, out_dir)
         return file_path
-    
-    @staticmethod
-    def extract_all(day_dir, out_dir, seq_type):
-        os.makedirs(out_dir, exist_ok=True)
-        files = glob.glob(os.path.join(day_dir, "*.csv"))
-        with ProcessPoolExecutor(max_workers=8) as executor:
-            future_list = list()
-            for f in files:
-                f = executor.submit(SeqExtractor.extract_one, f, out_dir, seq_type)
-                future_list.append(f)
-        for f in tqdm(future_list):
-            f.result()
-        SeqExtractor.merge_norm(out_dir, seq_type)
 
     @staticmethod
     def merge_norm(out_dir, seq_type):
@@ -155,11 +145,33 @@ class SeqExtractor(object):
                     fout.write(line)
             os.remove(file_path)
         fout.close()
+    
+    @staticmethod
+    def extract_all(day_dir, out_dir, seq_type, is_norm=False):
+        os.makedirs(out_dir, exist_ok=True)
+        files = glob.glob(os.path.join(day_dir, "*.csv"))
+        with ProcessPoolExecutor(max_workers=8) as executor:
+            future_list = list()
+            for f in files:
+                f = executor.submit(SeqExtractor.extract_one, f, out_dir, seq_type, is_norm)
+                future_list.append(f)
+        for f in tqdm(future_list):
+            f.result()
+        if is_norm:
+            SeqExtractor.merge_norm(out_dir, seq_type)
+
+    @staticmethod
+    def extract_seq(norm_dir, out_dir, seq_type):
+        
 
 """
-对单只股票数据进行norm
+单只股票数据进行复权+norm
 """
+import argparse
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='抽取数据，并根据seq分隔')
+    parser.add_argument("--stage", type=str, help="预处理步骤，第一步进行norm+复权；第二步根据配置进行序列分隔，输出HDF5数据")
+
     day_dir = "data/raw/day"
     out_dir = "data/process/day"
     SeqExtractor.extract_all(day_dir, out_dir, SeqExtractor.DAY)

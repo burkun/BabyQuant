@@ -13,13 +13,12 @@ class FileReader(object):
         self.seq_type = seq_type
         self.seq_length = seq_length
         self.stride = self.seq_length // 2
-        self.fout = None
 
     def load(self):
         self.fout = pd.read_csv(self.fpath)
     
     def seq_size(self):
-
+        pass
 
 class StockDataset(Dataset):
     def __init__(self, files_list, seq_length):
