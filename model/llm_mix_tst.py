@@ -9,7 +9,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from .layers import RevIN, make_linear_layer
-from .layers import TransformerBlock, RMSNorm, precompute_freqs_cis, PatchChannelHead
+from .layers import TransformerBlock, RMSNorm, precompute_freqs_cis, PatchChannelHead, PatchMixChannelHead
 
 @dataclass
 class ModelArgs:
@@ -31,8 +31,9 @@ class ModelArgs:
     n_min_patch: int = 2 # 头部的Patch保留两个不做预测
     use_time_feature: bool = False
     time_feature_dim: int = 5
+    price_channel:int = 0
     
-class LLMTST(nn.Module):
+class LLMMixTST(nn.Module):
     """
     基于语言模型预测的时间序列，使用patch编码，对整个patch进行预测
     注意1：不同时间类型的model最好加上起始虚拟patch or 增加time feature
@@ -45,7 +46,6 @@ class LLMTST(nn.Module):
         super().__init__()
         self.params = params
         self.n_layers = params.n_layers
-        self.loss_weight = torch.Tensor([1.0, 1.0, 1.0, 1.0, 0.001, 0.001, 0.001]).to(params.device)
         # self.loss_weight = torch.Tensor([1.0] * params.n_channel).to(params.device)
 
         assert params.max_seq_len % params.stride == 0 
@@ -53,7 +53,6 @@ class LLMTST(nn.Module):
         self.patch_num = int((params.max_seq_len - params.patch_len) / params.stride + 1)
         # 在最后padding一下，保证真实的最后的预测loss能够计算出来
         self.revin_layer = RevIN(params.n_channel, affine=False, subtract_last=False)
-        # 所有时间变量input输入共享一个全连接，TODO，后续可以分开。类似VAE编码，学习一个特别强的表征应该也很有用。
         self.patch_proj = make_linear_layer(params.patch_len, params.dim)
         if params.use_time_feature:
             self.time_proj = make_linear_layer(params.time_feature_dim * params.patch_len, params.dim)
@@ -63,9 +62,14 @@ class LLMTST(nn.Module):
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
-        self.head = nn.Sequential(nn.Dropout(params.dropout), 
-                                  PatchChannelHead(True, params.n_channel, params.dim, 
-                                                   params.n_predict_patch * params.patch_len))
+        self.head_channel = nn.Sequential(nn.Dropout(params.dropout), 
+                                  PatchChannelHead(individual=True, 
+                                                   n_channel=params.n_channel, 
+                                                   h_dim=params.dim,
+                                                   out_dim=params.dim))
+        self.head_mix =  PatchMixChannelHead(params.n_channel, params.dim, 
+                                          params.n_predict_patch * params.patch_len)
+        
         # some useful precompute for the RoPE relative positional embeddings
         freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
@@ -98,7 +102,7 @@ class LLMTST(nn.Module):
         z = z.unfold(dimension=-1, size=self.params.patch_len, step=self.params.stride)
         # time feature convert
         # z: [bs x nvars x patch_num x hidden_size]
-        enc_in = self.patch_proj(z)   
+        enc_in = self.patch_proj(z)  
         if time_feature is not None and self.params.use_time_feature:
             # [bs x patch_num x patch_len x time_dim]
             time_feature = time_feature.unfold(dimension=-2, size=self.params.patch_len, step=self.params.stride)
@@ -122,47 +126,45 @@ class LLMTST(nn.Module):
         # 根据T，T+1，预测 T+2，T+3的patch
         enc_out = torch.reshape(h, (-1, self.params.n_channel, h.shape[-2], h.shape[-1]))
         # [bs x nvar x patch_num x predict_patch_num * patch_length]
-        output = self.head(enc_out)
+        output = self.head_channel(enc_out)
         output = torch.reshape(output, (-1, self.params.n_channel, 
-                                self.patch_num * self.params.n_predict_patch * self.params.patch_len))
+                                self.patch_num * self.params.dim))
         # denorm
         output = output.permute(0,2,1)
         output = self.revin_layer(output, 'denorm')
         output = output.permute(0,2,1)
 
-        output = torch.reshape(output, (-1, self.params.n_channel, 
-                                self.patch_num, 
-                                self.params.n_predict_patch * self.params.patch_len))
+        output = torch.reshape(output, (-1, self.params.n_channel, self.patch_num, self.params.dim))
+
+        # shape = batch x patch_num x dim
+        output = self.head_mix(output)
+        output = torch.reshape(output, (-1, self.patch_num, 
+                                        self.params.n_predict_patch,
+                                        self.params.patch_len))
         return output
 
     def pretrain_loss(self, input_seq, seq_length, predict_out):
-        # predict_out shape = [bs x nvar x patch_num x predict_patch x patch_len]
-        predict_out = torch.reshape(predict_out, (-1,
-                                                  self.params.n_channel, 
-                                                  self.patch_num, 
-                                                  self.params.n_predict_patch,
-                                                  self.params.patch_len))
-        # Batch x nvar x len
-        input_seq = input_seq.permute(0,2,1)
+        input_seq = input_seq[:, :, self.params.price_channel]
         input_seq = input_seq.unfold(dimension=-1, size=self.params.patch_len, step=self.params.stride)
         # batch patch num
         patch_real_num = ((seq_length - self.params.patch_len) / self.params.stride + 1)
         patch_real_num = patch_real_num.unsqueeze(1)
         patch_mask = torch.arange(self.patch_num).unsqueeze(0).to(seq_length.device)
         patch_mask = patch_mask < patch_real_num
-        patch_mask = patch_mask[:, None, :, None]
+        patch_mask = patch_mask[:, :, None]
         batch_loss = []
         for idx in range(0, self.params.n_predict_patch):
-            pred = predict_out[:, :, :-(1+idx), idx, :]
-            target = input_seq[:, :, idx+1:, :]
-            mask = patch_mask[:, :, idx+1:, :]
+            pred = predict_out[:, :-(1+idx), idx, :]
+            # input = batch x patch_num x patch_len
+            target = input_seq[:, idx+1:, :]
+            mask = patch_mask[:, idx+1:, :]
             loss = F.mse_loss(pred, target, reduction="none")
             # shape = [bs x var x patch_num x patch_length]
-            loss = (loss * mask).mean(dim=[0, 2, 3])
+            loss = (loss * mask).sum()
             batch_loss.append(loss)
         total_loss = torch.sum(torch.vstack(batch_loss), dim=0)
-        all_loss = torch.sum(total_loss * self.loss_weight)
-        return all_loss, total_loss
+        all_loss = torch.sum(total_loss)
+        return all_loss, None
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters
@@ -209,12 +211,10 @@ if __name__ == "__main__":
     args = ModelArgs()
     args.n_channel = 2
     args.max_seq_len = 20
-    batch_size = 1
-    model = LLMTST(args).to('cuda')
+    batch_size = 3
+    model = LLMMixTST(args).to('cuda')
     
     inputs = torch.randn(batch_size, args.max_seq_len, args.n_channel)
     seq_len = torch.ones(batch_size) * 5
     predict_out = model(inputs.to('cuda'))
-    
     loss = model.pretrain_loss(inputs.to('cuda'), seq_len.to('cuda'), predict_out)
-

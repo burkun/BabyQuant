@@ -132,7 +132,7 @@ class PatchTSTModel(nn.Module):
                                       full_enc_int.shape[3]))
         # enc_out: [bs * nvars x patch_num x hidden_size]
         enc_out = self.encoder(full_enc_int)
-        # enc_out: [bs x nvars x hidden_size x patch_num]
+        # enc_out: [bs x nvars x patch_num x hidden_size]
         enc_out = torch.reshape(enc_out, (-1, self.c_in, enc_out.shape[-2], enc_out.shape[-1]))
         # if head is pretrain [bs x nvars x 1]; if head is supervise [bs x nvar x predict_day * c_out]
         z = self.head(enc_out)

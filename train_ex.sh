@@ -1,0 +1,11 @@
+python3 train.py --train_path='data/process/5min/*.train.csv' \
+                 --valid_path='data/process/5min/*.valid.csv' \
+                 --max_seq_len=300 \
+                 --random_split_ratio=0.3 \
+                 --batch_size=50 \
+                 --num_epochs=20 \
+                 --cache_size=30 \
+                 --device=cuda \
+                 --data_type=3 \
+                 --use_time_feature \
+                 --model_arch='1024|12|8'

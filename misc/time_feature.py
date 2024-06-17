@@ -73,6 +73,11 @@ class WeekOfYear(TimeFeature):
         return (index.isocalendar().week - 1) / 52.0 - 0.5
 
 
+class PlaceHolder(TimeFeature):
+    def __call__(self, index: pd.DatetimeIndex) -> np.ndarray:
+        return np.zeros(index.day.shape[0], dtype=np.float32)
+
+
 def time_features_from_frequency_str(freq_str: str) -> List[TimeFeature]:
     """
     Returns a list of time features that will be appropriate for the given frequency string.
@@ -87,7 +92,7 @@ def time_features_from_frequency_str(freq_str: str) -> List[TimeFeature]:
         offsets.QuarterEnd: [MonthOfYear],
         offsets.MonthEnd: [MonthOfYear],
         offsets.Week: [DayOfMonth, WeekOfYear],
-        offsets.Day: [DayOfWeek, DayOfMonth, DayOfYear],
+        offsets.Day: [DayOfWeek, DayOfMonth, DayOfYear, PlaceHolder, PlaceHolder],
         offsets.BusinessDay: [DayOfWeek, DayOfMonth, DayOfYear],
         offsets.Hour: [HourOfDay, DayOfWeek, DayOfMonth, DayOfYear],
         offsets.Minute: [
@@ -131,4 +136,12 @@ def time_features_from_frequency_str(freq_str: str) -> List[TimeFeature]:
 
 
 def time_features(dates, freq='h'):
-    return np.vstack([feat(dates) for feat in time_features_from_frequency_str(freq)])
+    return np.vstack([feat(dates) for feat in time_features_from_frequency_str(freq)]).transpose()
+
+
+if __name__ == "__main__":
+    datetime_array = ['2024-01-01', '2024-01-02', '2024-12-30']
+    dt_index = pd.to_datetime(datetime_array)
+    out_feature = time_features(dt_index, 'd')
+    # shape = [inputs, feature_num]
+    print(out_feature)
